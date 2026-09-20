@@ -40,7 +40,11 @@ final statsRangeProvider = StreamProvider<List<TxRecord>>((ref) {
 final statsEntriesProvider = Provider<List<StatEntry>>((ref) {
   final records = ref.watch(statsRangeProvider).value;
   if (records == null) return const [];
-  return records.map(toStatEntry).toList(growable: false);
+  // 转账不参与收入/支出统计（含分类占比），在入口处过滤掉。
+  return records
+      .where((r) => !r.isTransfer)
+      .map(toStatEntry)
+      .toList(growable: false);
 });
 
 /// 当前方向下的分类占比（金额降序）。

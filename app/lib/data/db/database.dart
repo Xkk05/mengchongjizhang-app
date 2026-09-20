@@ -25,7 +25,7 @@ class AppDatabase extends _$AppDatabase {
   static QueryExecutor _open() => driftDatabase(name: 'suixin_pet_ledger');
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -57,6 +57,11 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(storeItems, storeItems.decorSlot);
             await _backfillDecorSlots();
           }
+          if (from < 5) {
+            // v5 支持转账：流水加「转入账户」列，并补一个内置「转账」分类。
+            await m.addColumn(transactions, transactions.toAccountId);
+            await _ensureTransferCategory();
+          }
         },
       );
 
@@ -86,6 +91,7 @@ class AppDatabase extends _$AppDatabase {
     );
 
     await _seedStoreItems();
+    await _ensureTransferCategory();
 
     // 演示种子数据：首次安装即有内容可看，便于比对设计稿。
     // 正式发版前删除该段即可（不影响表结构与逻辑）。
@@ -101,6 +107,25 @@ class AppDatabase extends _$AppDatabase {
 
   // 演示种子数据开关：false = 全新安装不再预置演示流水与预算（结构数据照常）。
   static const bool _seedSample = false;
+
+  /// 内置「转账」分类：转账不参与收支统计，但流水表要求非空分类，
+  /// 所以给它一个专门的占位分类（isBuiltIn=true，不可删）。
+  Future<void> _ensureTransferCategory() async {
+    final exists = await (select(categories)
+          ..where((t) => t.kind.equalsValue(TxKind.transfer)))
+        .getSingleOrNull();
+    if (exists != null) return;
+    await into(categories).insert(
+      CategoriesCompanion(
+        name: const Value('转账'),
+        kind: const Value(TxKind.transfer),
+        iconKey: const Value('transfer'),
+        colorValue: const Value(0xFF7A8B84),
+        sortOrder: const Value(0),
+        isBuiltIn: const Value(true),
+      ),
+    );
+  }
 
   /// 新手礼包：初次建档送一点金币，否则新用户要记几十笔才买得起东西。
   static const int welcomeCoin = 60;

@@ -272,6 +272,44 @@ void main() {
       expect(names, containsAll(['咖啡', '健身', '稿费']));
     });
   });
+
+  group('转账导入导出', () {
+    test('转账导出→解析→导入后往返无损，且明细带回转入账户', () async {
+      final accounts = {
+        for (final a in await allAccounts()) a.name: a.id,
+      };
+      final transferCatId = await repo.transferCategoryId();
+      final ledger = await db.select(db.ledgers).getSingle();
+
+      await db.into(db.transactions).insert(
+            TransactionsCompanion.insert(
+              ledgerId: ledger.id,
+              accountId: accounts['招商银行']!,
+              categoryId: transferCatId,
+              kind: TxKind.transfer,
+              amountCents: 50000,
+              occurredAt: DateTime(2020, 11, 11, 11, 0),
+              note: Value('资金调拨'),
+              toAccountId: Value(accounts['支付宝']),
+            ),
+          );
+
+      // 导出 → 解析 → 导入：应识别为重复，不新增。
+      final text = LedgerCsv.encode(await repo.exportRows());
+      final parsed = LedgerCsv.parse(text);
+      expect(parsed.errors, isEmpty);
+      expect(parsed.rows.any((r) => r.isTransfer), isTrue);
+
+      final preview = await repo.previewImport(parsed);
+      expect(preview.importable, 0, reason: '转账导出后重导入应为重复');
+
+      // 明细里转账行带转入账户名。
+      final all = await repo.watchRecent().first;
+      final t = all.firstWhere((r) => r.isTransfer);
+      expect(t.accountName, '招商银行');
+      expect(t.toAccountName, '支付宝');
+    });
+  });
 }
 
 /// 与生产库 `_seedTransactions` 相同的 8 笔演示流水（时间相对当天），

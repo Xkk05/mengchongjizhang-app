@@ -1,7 +1,11 @@
 import 'package:drift/drift.dart';
 
-/// 收支类型。存成 int，避免字符串拼写漂移。
-enum TxKind { expense, income }
+/// 账目类型。存成 int，避免字符串拼写漂移。
+///
+/// - `expense`：支出（减少账户余额）
+/// - `income`：收入（增加账户余额）
+/// - `transfer`：转账（从一个账户转到另一个账户，不影响收入/支出/结余）
+enum TxKind { expense, income, transfer }
 
 /// 商店商品的类别。
 ///
@@ -72,6 +76,10 @@ class Transactions extends Table {
   IntColumn get categoryId =>
       integer().references(Categories, #id, onDelete: KeyAction.cascade)();
   IntColumn get kind => intEnum<TxKind>()();
+
+  /// 转账的**转入**账户；支出/收入为空。
+  IntColumn get toAccountId =>
+      integer().nullable().references(Accounts, #id, onDelete: KeyAction.setNull)();
 
   /// 金额（分），恒为正；方向由 kind 决定。
   IntColumn get amountCents => integer()();

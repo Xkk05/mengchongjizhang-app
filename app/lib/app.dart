@@ -9,6 +9,7 @@ import 'ui/assets/assets_page.dart';
 import 'ui/backpack/backpack_page.dart';
 import 'ui/budget/budget_page.dart';
 import 'ui/calendar/calendar_page.dart';
+import 'ui/categories/categories_page.dart';
 import 'ui/checkin/checkin_page.dart';
 import 'ui/data/data_page.dart';
 import 'ui/ledger/ledger_page.dart';
@@ -77,6 +78,11 @@ final GoRouter appRouter = GoRouter(
     GoRoute(
       path: '/data',
       builder: (context, state) => const DataPage(),
+    ),
+    // 分类管理：自定义支出 / 收入分类。
+    GoRoute(
+      path: '/categories',
+      builder: (context, state) => const CategoriesPage(),
     ),
   ],
 );

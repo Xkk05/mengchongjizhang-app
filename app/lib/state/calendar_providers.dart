@@ -12,7 +12,9 @@ import 'stats_providers.dart';
 final calendarEntriesProvider = Provider<List<CalendarEntry>>((ref) {
   final records = ref.watch(statsRangeProvider).value;
   if (records == null) return const [];
+  // 转账不计入日历收支汇总。
   return records
+      .where((r) => !r.isTransfer)
       .map((r) => (
             at: r.occurredAt,
             isExpense: r.isExpense,
@@ -69,6 +71,7 @@ final selectedDayTotalsProvider =
   var expense = 0;
   var income = 0;
   for (final r in ref.watch(selectedDayRecordsProvider)) {
+    if (r.isTransfer) continue;
     if (r.isExpense) {
       expense += r.amountCents;
     } else {

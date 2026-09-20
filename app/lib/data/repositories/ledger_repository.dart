@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:drift/drift.dart';
 
 import '../../domain/assets/account_balance.dart';
@@ -16,6 +18,7 @@ class TxRecord {
     required this.categoryIconKey,
     required this.categoryColor,
     required this.accountName,
+    this.toAccountName,
   });
 
   final TxRow row;
@@ -24,7 +27,12 @@ class TxRecord {
   final int categoryColor;
   final String accountName;
 
+  /// 转账的转入账户名；非转账为空。
+  final String? toAccountName;
+
   bool get isExpense => row.kind == TxKind.expense;
+  bool get isIncome => row.kind == TxKind.income;
+  bool get isTransfer => row.kind == TxKind.transfer;
   int get amountCents => row.amountCents;
   DateTime get occurredAt => row.occurredAt;
   String get note => row.note;
@@ -197,19 +205,49 @@ class LedgerRepository {
 
   // ------------------------------------------------------------------ 读取
 
-  /// 最近的账目，按时间倒序。
-  Stream<List<TxRecord>> watchRecent({int limit = 300}) {
+  /// 最近的账目，按时间倒序；支持关键词 / 分类 / 账户 / 类型筛选。
+  Stream<List<TxRecord>> watchRecent({
+    int limit = 300,
+    String query = '',
+    Set<int>? categoryIds,
+    Set<int>? accountIds,
+    Set<TxKind>? kinds,
+  }) {
+    final toAccount = _db.accounts.createAlias('toAccount');
     final q = _db.select(_db.transactions).join([
       innerJoin(_db.categories, _db.categories.id.equalsExp(_db.transactions.categoryId)),
       innerJoin(_db.accounts, _db.accounts.id.equalsExp(_db.transactions.accountId)),
-    ])
+      leftOuterJoin(toAccount, toAccount.id.equalsExp(_db.transactions.toAccountId)),
+    ]);
+
+    final kw = query.trim();
+    if (kw.isNotEmpty) {
+      final like = '%$kw%';
+      q.where(_db.transactions.note.like(like) |
+          _db.categories.name.like(like) |
+          _db.accounts.name.like(like));
+    }
+    if (categoryIds != null && categoryIds.isNotEmpty) {
+      q.where(_db.transactions.categoryId.isIn(categoryIds));
+    }
+    if (accountIds != null && accountIds.isNotEmpty) {
+      // 转账的转入账户也计入筛选，避免「转进某账户」被漏掉。
+      q.where(_db.transactions.accountId.isIn(accountIds) |
+          _db.transactions.toAccountId.isIn(accountIds));
+    }
+    if (kinds != null && kinds.isNotEmpty) {
+      q.where(
+          _db.transactions.kind.isIn(kinds.map((k) => k.index).toList()));
+    }
+
+    q
       ..orderBy([
         OrderingTerm.desc(_db.transactions.occurredAt),
         OrderingTerm.desc(_db.transactions.id),
       ])
       ..limit(limit);
 
-    return q.watch().map(_mapJoined);
+    return q.watch().map((rows) => _mapJoined(rows, toAccount));
   }
 
   /// 指定时间区间内的账目（左闭右开）。
@@ -217,9 +255,11 @@ class LedgerRepository {
   /// 统计场景按月取数后在内存聚合 —— 个人记账的数据量下足够快，也省去
   /// SQL 侧按「天」分组的方言差异。
   Stream<List<TxRecord>> watchRange(DateTime start, DateTime end) {
+    final toAccount = _db.accounts.createAlias('toAccount');
     final q = _db.select(_db.transactions).join([
       innerJoin(_db.categories, _db.categories.id.equalsExp(_db.transactions.categoryId)),
       innerJoin(_db.accounts, _db.accounts.id.equalsExp(_db.transactions.accountId)),
+      leftOuterJoin(toAccount, toAccount.id.equalsExp(_db.transactions.toAccountId)),
     ])
       ..where(_db.transactions.occurredAt.isBiggerOrEqualValue(start) &
           _db.transactions.occurredAt.isSmallerThanValue(end))
@@ -228,18 +268,20 @@ class LedgerRepository {
         OrderingTerm.desc(_db.transactions.id),
       ]);
 
-    return q.watch().map(_mapJoined);
+    return q.watch().map((rows) => _mapJoined(rows, toAccount));
   }
 
-  List<TxRecord> _mapJoined(List<TypedResult> rows) => rows
+  List<TxRecord> _mapJoined(List<TypedResult> rows, TableInfo toAccount) => rows
       .map((r) {
         final cat = r.readTable(_db.categories);
+        final target = r.readTableOrNull(toAccount);
         return TxRecord(
           row: r.readTable(_db.transactions),
           categoryName: cat.name,
           categoryIconKey: cat.iconKey,
           categoryColor: cat.colorValue,
           accountName: r.readTable(_db.accounts).name,
+          toAccountName: target?.name,
         );
       })
       .toList(growable: false);
@@ -284,52 +326,89 @@ class LedgerRepository {
 
   /// 账户 + 其流水净额 → 实时余额。
   ///
-  /// 用「账户 LEFT JOIN 流水」一次取回后在内存归并：个人记账的数据量下
-  /// 完全够用，也省去 SQL 侧按方向求和的方言差异。
+  /// 转账是「转出账户 -金额、转入账户 +金额」，单靠一条
+  /// `账户 LEFT JOIN 流水(accountId)` 算不到转入侧，这里改成分别监听
+  /// 账户与流水两个流，在内存里归并——个人记账的数据量下完全够用，
+  /// 也天然支持转账双向、且不影响收入/支出统计。
   Stream<List<AccountBalance>> watchAccountsWithBalance() {
-    final q = _db.select(_db.accounts).join([
-      leftOuterJoin(
-        _db.transactions,
-        _db.transactions.accountId.equalsExp(_db.accounts.id),
-      ),
-    ])
-      ..orderBy([OrderingTerm.asc(_db.accounts.sortOrder)]);
+    return _latest2(
+      (_db.select(_db.accounts)
+            ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
+          .watch(),
+      _db.select(_db.transactions).watch(),
+    ).map((r) => _computeBalances(r.$1, r.$2));
+  }
 
-    return q.watch().map((rows) {
-      final byId = <int, AccountBalance>{};
-      final order = <int>[];
+  List<AccountBalance> _computeBalances(
+      List<Account> accounts, List<TxRow> txs) {
+    final flow = <int, int>{};
+    final count = <int, int>{};
 
-      for (final r in rows) {
-        final acc = r.readTable(_db.accounts);
-        var entry = byId[acc.id];
-        if (entry == null) {
-          entry = AccountBalance(
-            id: acc.id,
-            name: acc.name,
-            iconKey: acc.iconKey,
-            colorValue: acc.colorValue,
-            initialCents: acc.initialBalanceCents,
-            flowCents: 0,
-            txCount: 0,
-            includedInNetWorth: acc.includedInNetWorth,
-          );
-          order.add(acc.id);
+    for (final tx in txs) {
+      if (tx.kind == TxKind.transfer) {
+        // 转出侧：余额减少；转入侧：余额增加。整笔只计入转出账户的笔数。
+        flow[tx.accountId] = (flow[tx.accountId] ?? 0) - tx.amountCents;
+        count[tx.accountId] = (count[tx.accountId] ?? 0) + 1;
+        final to = tx.toAccountId;
+        if (to != null) {
+          flow[to] = (flow[to] ?? 0) + tx.amountCents;
         }
-
-        final tx = r.readTableOrNull(_db.transactions);
-        if (tx != null) {
-          final signed =
-              tx.kind == TxKind.income ? tx.amountCents : -tx.amountCents;
-          entry = entry.copyWith(
-            flowCents: entry.flowCents + signed,
-            txCount: entry.txCount + 1,
-          );
-        }
-        byId[acc.id] = entry;
+      } else {
+        final signed = tx.kind == TxKind.income ? tx.amountCents : -tx.amountCents;
+        flow[tx.accountId] = (flow[tx.accountId] ?? 0) + signed;
+        count[tx.accountId] = (count[tx.accountId] ?? 0) + 1;
       }
+    }
 
-      return order.map((id) => byId[id]!).toList(growable: false);
-    });
+    return accounts
+        .map((a) => AccountBalance(
+              id: a.id,
+              name: a.name,
+              iconKey: a.iconKey,
+              colorValue: a.colorValue,
+              initialCents: a.initialBalanceCents,
+              flowCents: flow[a.id] ?? 0,
+              txCount: count[a.id] ?? 0,
+              includedInNetWorth: a.includedInNetWorth,
+            ))
+        .toList(growable: false);
+  }
+
+  /// 两个流的「最新值合并」：任一流有新值就重算。
+  ///
+  /// 项目未引入 rxdart，这里用最小实现避免额外依赖。
+  static Stream<(A, B)> _latest2<A, B>(Stream<A> a, Stream<B> b) {
+    late final StreamController<(A, B)> controller;
+    StreamSubscription<A>? subA;
+    StreamSubscription<B>? subB;
+    A? lastA;
+    B? lastB;
+    var hasA = false;
+    var hasB = false;
+
+    void emit() {
+      if (hasA && hasB) controller.add((lastA as A, lastB as B));
+    }
+
+    controller = StreamController<(A, B)>(
+      onListen: () {
+        subA = a.listen((v) {
+          lastA = v;
+          hasA = true;
+          emit();
+        });
+        subB = b.listen((v) {
+          lastB = v;
+          hasB = true;
+          emit();
+        });
+      },
+      onCancel: () async {
+        await subA?.cancel();
+        await subB?.cancel();
+      },
+    );
+    return controller.stream;
   }
 
   /// 某个月的预算（含分类元信息），总预算排在最前。
@@ -413,6 +492,14 @@ class LedgerRepository {
         ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
       .get();
 
+  /// 全部分类（按类型、排序），分类管理页用。
+  Stream<List<Category>> watchCategories() => (_db.select(_db.categories)
+        ..orderBy([
+          (t) => OrderingTerm.asc(t.kind),
+          (t) => OrderingTerm.asc(t.sortOrder),
+        ]))
+      .watch();
+
   // ------------------------------------------------------------------ 写入
 
   /// 记一笔账：写流水 + 结算宠物奖励，同一事务内完成。
@@ -424,8 +511,11 @@ class LedgerRepository {
     required int amountCents,
     required DateTime occurredAt,
     String note = '',
+    int? toAccountId,
   }) {
     assert(amountCents > 0, '金额必须为正数（分）');
+    assert(kind != TxKind.transfer || (toAccountId != null && toAccountId != accountId),
+        '转账必须指定转入账户且不同于转出账户');
 
     return _db.transaction(() async {
       final id = await _db.into(_db.transactions).insert(
@@ -437,6 +527,7 @@ class LedgerRepository {
               amountCents: amountCents,
               occurredAt: occurredAt,
               note: Value(note.trim()),
+              toAccountId: Value(toAccountId),
             ),
           );
 
@@ -459,6 +550,12 @@ class LedgerRepository {
   Future<void> deleteTransaction(int id) =>
       (_db.delete(_db.transactions)..where((t) => t.id.equals(id))).go();
 
+  /// 批量删除账目（多选清理用）。
+  Future<void> deleteTransactions(List<int> ids) {
+    if (ids.isEmpty) return Future.value();
+    return (_db.delete(_db.transactions)..where((t) => t.id.isIn(ids))).go();
+  }
+
   /// 修改一笔账（不重复结算宠物奖励）。
   Future<void> updateTransaction({
     required int id,
@@ -468,6 +565,7 @@ class LedgerRepository {
     required int amountCents,
     required DateTime occurredAt,
     String note = '',
+    int? toAccountId,
   }) {
     assert(amountCents > 0, '金额必须为正数（分）');
     return (_db.update(_db.transactions)..where((t) => t.id.equals(id))).write(
@@ -478,6 +576,7 @@ class LedgerRepository {
         amountCents: Value(amountCents),
         occurredAt: Value(occurredAt),
         note: Value(note.trim()),
+        toAccountId: Value(toAccountId),
       ),
     );
   }
@@ -501,6 +600,67 @@ class LedgerRepository {
       );
       return true;
     });
+  }
+
+  // ------------------------------------------------------------ 分类增删改
+
+  /// 新增分类，排在该类型末尾。
+  Future<int> addCategory({
+    required TxKind kind,
+    required String name,
+    required String iconKey,
+    required int colorValue,
+  }) async {
+    final maxOrder = await (_db.selectOnly(_db.categories)
+          ..addColumns([_db.categories.sortOrder.max()])
+          ..where(_db.categories.kind.equalsValue(kind)))
+        .getSingleOrNull();
+    final nextOrder =
+        (maxOrder?.read(_db.categories.sortOrder.max()) ?? -1) + 1;
+
+    return _db.into(_db.categories).insert(
+          CategoriesCompanion.insert(
+            name: name.trim(),
+            kind: kind,
+            iconKey: iconKey,
+            colorValue: colorValue,
+            sortOrder: Value(nextOrder),
+          ),
+        );
+  }
+
+  /// 改分类的名称 / 图标 / 颜色（内置分类也允许改，只是不让删）。
+  Future<void> updateCategory({
+    required int id,
+    required String name,
+    required String iconKey,
+    required int colorValue,
+  }) =>
+      (_db.update(_db.categories)..where((t) => t.id.equals(id))).write(
+        CategoriesCompanion(
+          name: Value(name.trim()),
+          iconKey: Value(iconKey),
+          colorValue: Value(colorValue),
+        ),
+      );
+
+  /// 删除分类：内置分类、或已有账目的分类不允许删，返回失败原因；成功返回 null。
+  Future<String?> deleteCategory(int id) async {
+    final cat = await (_db.select(_db.categories)
+          ..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    if (cat == null) return '分类不存在';
+    if (cat.isBuiltIn) return '系统预置分类不可删除';
+
+    final countRow = await (_db.selectOnly(_db.transactions)
+          ..addColumns([countAll()])
+          ..where(_db.transactions.categoryId.equals(id)))
+        .getSingle();
+    final used = countRow.read(countAll()) ?? 0;
+    if (used > 0) return '该分类下有 $used 笔账目，无法删除';
+
+    await (_db.delete(_db.categories)..where((t) => t.id.equals(id))).go();
+    return null;
   }
 
   // ------------------------------------------------------------ 账户增删改
@@ -796,8 +956,10 @@ class LedgerRepository {
         .map((t) => (
               at: t.row.occurredAt,
               isExpense: t.row.kind == TxKind.expense,
+              isTransfer: t.row.kind == TxKind.transfer,
               categoryName: t.categoryName,
               accountName: t.accountName,
+              toAccountName: t.toAccountName ?? '',
               amountCents: t.row.amountCents,
               note: t.note,
             ))
@@ -882,12 +1044,28 @@ class LedgerRepository {
 
       // 3) 批量写流水
       final toInsert = <TransactionsCompanion>[];
+      int? transferCatId;
       for (final r in plan.fresh) {
-        final kind = r.isExpense ? TxKind.expense : TxKind.income;
-        final categoryId =
-            plan.catId['${kind.index}|${_categoryNameOf(r)}'];
+        final TxKind kind;
+        int? categoryId;
+        int? toAccountId;
+        if (r.isTransfer) {
+          kind = TxKind.transfer;
+          transferCatId ??= await transferCategoryId();
+          categoryId = transferCatId;
+          final toName = r.toAccountName.trim();
+          toAccountId = toName.isEmpty ? null : plan.accId[toName];
+        } else {
+          kind = r.isExpense ? TxKind.expense : TxKind.income;
+          categoryId = plan.catId['${kind.index}|${_categoryNameOf(r)}'];
+        }
         final accountId = plan.accId[_accountNameOf(r)];
         if (categoryId == null || accountId == null) continue; // 兜底，正常不触发
+        // 转账缺少有效转入账户时跳过（解析层已兜底，此处再保险一次）。
+        if (kind == TxKind.transfer &&
+            (toAccountId == null || toAccountId == accountId)) {
+          continue;
+        }
         toInsert.add(
           TransactionsCompanion.insert(
             ledgerId: ledgerId,
@@ -897,6 +1075,7 @@ class LedgerRepository {
             amountCents: r.amountCents,
             occurredAt: r.at,
             note: Value(r.note),
+            toAccountId: Value(toAccountId),
           ),
         );
       }
@@ -915,17 +1094,20 @@ class LedgerRepository {
   }
 
   Future<List<TxRecord>> _exportRecords() {
+    final toAccount = _db.accounts.createAlias('toAccount');
     final q = _db.select(_db.transactions).join([
       innerJoin(_db.categories,
           _db.categories.id.equalsExp(_db.transactions.categoryId)),
       innerJoin(
           _db.accounts, _db.accounts.id.equalsExp(_db.transactions.accountId)),
+      leftOuterJoin(
+          toAccount, toAccount.id.equalsExp(_db.transactions.toAccountId)),
     ])
       ..orderBy([
         OrderingTerm.asc(_db.transactions.occurredAt),
         OrderingTerm.asc(_db.transactions.id),
       ]);
-    return q.get().then(_mapJoined);
+    return q.get().then((rows) => _mapJoined(rows, toAccount));
   }
 
   /// 计算导入计划：解析现有分类 / 账户 → 按指纹计数去重 → 收集待建分类账户。
@@ -945,9 +1127,11 @@ class LedgerRepository {
       final fp = LedgerCsv.fingerprintOf(
         at: t.row.occurredAt,
         isExpense: t.row.kind == TxKind.expense,
+        isTransfer: t.row.kind == TxKind.transfer,
         amountCents: t.row.amountCents,
         categoryName: t.categoryName,
         accountName: t.accountName,
+        toAccountName: t.toAccountName ?? '',
         note: t.note,
       );
       counts[fp] = (counts[fp] ?? 0) + 1;
@@ -969,17 +1153,28 @@ class LedgerRepository {
       }
       fresh.add(r);
 
-      final kind = r.isExpense ? TxKind.expense : TxKind.income;
-      final catKey = '${kind.index}|${_categoryNameOf(r)}';
-      if (catId[catKey] == null) {
-        catId[catKey] = -1; // 占位：待创建
-        (r.isExpense ? newExpenseCategories : newIncomeCategories)
-            .add(_categoryNameOf(r));
+      // 转账不建分类（走内置「转账」占位分类），也不进收/支新建分类列表。
+      if (!r.isTransfer) {
+        final kind = r.isExpense ? TxKind.expense : TxKind.income;
+        final catKey = '${kind.index}|${_categoryNameOf(r)}';
+        if (catId[catKey] == null) {
+          catId[catKey] = -1; // 占位：待创建
+          (r.isExpense ? newExpenseCategories : newIncomeCategories)
+              .add(_categoryNameOf(r));
+        }
       }
       final accName = _accountNameOf(r);
       if (accId[accName] == null) {
         accId[accName] = -1;
         newAccounts.add(accName);
+      }
+      // 转账的转入账户也要确保存在，导入时才能解析到账户 id。
+      if (r.isTransfer && r.toAccountName.trim().isNotEmpty) {
+        final toName = r.toAccountName.trim();
+        if (accId[toName] == null) {
+          accId[toName] = -1;
+          newAccounts.add(toName);
+        }
       }
     }
 
@@ -1019,6 +1214,24 @@ class LedgerRepository {
           LedgersCompanion.insert(
             name: '日常账本',
             isDefault: const Value(true),
+          ),
+        );
+  }
+
+  /// 内置「转账」分类 id（转账流水用它作占位分类；缺失时兜底补建）。
+  Future<int> transferCategoryId() async {
+    final row = await (_db.select(_db.categories)
+          ..where((t) => t.kind.equalsValue(TxKind.transfer)))
+        .getSingleOrNull();
+    if (row != null) return row.id;
+    return _db.into(_db.categories).insert(
+          CategoriesCompanion(
+            name: const Value('转账'),
+            kind: const Value(TxKind.transfer),
+            iconKey: const Value('transfer'),
+            colorValue: const Value(0xFF7A8B84),
+            sortOrder: const Value(0),
+            isBuiltIn: const Value(true),
           ),
         );
   }

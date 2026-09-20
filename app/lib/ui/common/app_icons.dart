@@ -17,6 +17,8 @@ const Map<String, IconData> kIconRegistry = <String, IconData>{
   'pay': Icons.payments_rounded,
   'job': Icons.work_rounded,
   'invest': Icons.trending_up_rounded,
+  // 转账
+  'transfer': Icons.swap_horiz_rounded,
   // 账户
   'wallet': Icons.account_balance_wallet_rounded,
   'alipay': Icons.currency_yuan_rounded,

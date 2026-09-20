@@ -277,6 +277,27 @@ class ProfilePage extends ConsumerWidget {
               Divider(height: 1, color: c.border),
               ListTile(
                 dense: true,
+                leading:
+                    Icon(Icons.category_rounded, size: 20, color: c.mintDeep),
+                title: Text(
+                  '分类管理',
+                  style: TextStyle(
+                    fontSize: AppFontSizes.md,
+                    fontWeight: FontWeight.w600,
+                    color: c.ink,
+                  ),
+                ),
+                subtitle: Text(
+                  '新增 / 编辑支出与收入分类',
+                  style: TextStyle(fontSize: AppFontSizes.sm, color: c.ink3),
+                ),
+                trailing:
+                    Icon(Icons.chevron_right_rounded, size: 18, color: c.ink3),
+                onTap: () => context.push('/categories'),
+              ),
+              Divider(height: 1, color: c.border),
+              ListTile(
+                dense: true,
                 leading: Icon(Icons.import_export_rounded,
                     size: 20, color: c.mintDeep),
                 title: Text(
@@ -299,7 +320,7 @@ class ProfilePage extends ConsumerWidget {
               _InfoTile(
                 icon: Icons.info_outline_rounded,
                 label: '版本',
-                value: 'v0.9.3 · Flutter',
+                value: 'v0.9.4 · Flutter',
               ),
               Divider(height: 1, color: c.border),
               _InfoTile(

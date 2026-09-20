@@ -11,8 +11,10 @@ library;
 typedef CsvLedgerRow = ({
   DateTime at,
   bool isExpense,
+  bool isTransfer,
   String categoryName,
   String accountName,
+  String toAccountName,
   int amountCents,
   String note,
 });
@@ -48,7 +50,9 @@ class LedgerCsv {
   static const String bom = '\uFEFF';
 
   /// 导出表头（顺序即列顺序）。
-  static const List<String> headers = ['日期', '类型', '分类', '账户', '金额', '备注'];
+  static const List<String> headers = [
+    '日期', '类型', '分类', '账户', '转入账户', '金额', '备注',
+  ];
 
   /// 表头别名表：字段 -> 可接受的列名（一律小写、忽略空格后比较）。
   static const Map<String, List<String>> _aliases = {
@@ -56,6 +60,7 @@ class LedgerCsv {
     'kind': ['类型', '收支', '收支类型', '方向', 'type'],
     'category': ['分类', '类别', '分类名称', 'category'],
     'account': ['账户', '账户名', '资金账户', '支付方式', 'account'],
+    'toAccount': ['转入账户', '收款账户', '目标账户', '转入'],
     'amount': ['金额', '金额(元)', '金额（元）', '交易金额', '收支金额', 'amount'],
     'note': ['备注', '说明', '描述', '商品说明', 'note'],
   };
@@ -72,9 +77,10 @@ class LedgerCsv {
       b
         ..write([
           _formatDate(r.at),
-          r.isExpense ? '支出' : '收入',
+          r.isTransfer ? '转账' : (r.isExpense ? '支出' : '收入'),
           _escape(r.categoryName),
           _escape(r.accountName),
+          _escape(r.toAccountName),
           // 金额导出为「元」的两位小数、不带千分位与符号，保证机器往返无损。
           (r.amountCents.abs() / 100).toStringAsFixed(2),
           _escape(r.note),
@@ -149,15 +155,20 @@ class LedgerCsv {
         continue;
       }
 
-      // 方向优先级：显式类型列 > 金额正负号 > 默认支出。
-      final kindExpense = _parseKind(_pick(raw, col['kind']));
-      final isExpense = kindExpense ?? amount.negative ?? true;
+      // 方向优先级：显式「转账」> 显式「收支」> 金额正负号 > 默认支出。
+      final isTransfer = _parseTransfer(_pick(raw, col['kind']));
+      final kindExpense =
+          isTransfer ? null : _parseKind(_pick(raw, col['kind']));
+      final isExpense =
+          isTransfer ? false : (kindExpense ?? amount.negative ?? true);
 
       rows.add((
         at: at,
         isExpense: isExpense,
+        isTransfer: isTransfer,
         categoryName: _pick(raw, col['category']).trim(),
         accountName: _pick(raw, col['account']).trim(),
+        toAccountName: _pick(raw, col['toAccount']).trim(),
         amountCents: amount.cents.abs(),
         note: _pick(raw, col['note']).trim(),
       ));
@@ -175,23 +186,28 @@ class LedgerCsv {
   static String fingerprint(CsvLedgerRow row) => fingerprintOf(
         at: row.at,
         isExpense: row.isExpense,
+        isTransfer: row.isTransfer,
         amountCents: row.amountCents,
         categoryName: row.categoryName,
         accountName: row.accountName,
+        toAccountName: row.toAccountName,
         note: row.note,
       );
 
   static String fingerprintOf({
     required DateTime at,
     required bool isExpense,
+    bool isTransfer = false,
     required int amountCents,
     required String categoryName,
     required String accountName,
+    String toAccountName = '',
     required String note,
   }) {
     final m = DateTime(at.year, at.month, at.day, at.hour, at.minute);
-    return '${m.toIso8601String()}|${isExpense ? 'E' : 'I'}|$amountCents'
-        '|$categoryName|$accountName|$note';
+    final kindCode = isTransfer ? 'T' : (isExpense ? 'E' : 'I');
+    return '${m.toIso8601String()}|$kindCode|$amountCents'
+        '|$categoryName|$accountName|${isTransfer ? toAccountName : ''}|$note';
   }
 
   // ------------------------------------------------------------ 内部：编解码
@@ -349,5 +365,18 @@ class LedgerCsv {
     if (t.contains('支出') || t.contains('消费') || t.contains('expense')) return true;
     if (t.contains('收入') || t.contains('income')) return false;
     return null;
+  }
+
+  static const Set<String> _transferWords = {
+    '转账', '转帐', '转移', '内部转账', 'transfer', 'movement',
+  };
+
+  /// 解析「类型」列是否为转账；认不出来返回 false。
+  static bool _parseTransfer(String raw) {
+    final t = raw.trim().toLowerCase();
+    if (t.isEmpty) return false;
+    if (_transferWords.contains(t)) return true;
+    if (t.contains('转账') || t.contains('transfer')) return true;
+    return false;
   }
 }

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/utils/date_labels.dart';
 import '../../core/utils/money.dart';
+import '../../data/db/tables.dart';
 import '../../data/repositories/ledger_repository.dart';
 import '../../state/ledger_providers.dart';
 import '../../state/providers.dart';
@@ -18,7 +19,8 @@ class LedgerPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(recentTransactionsProvider);
+    final async = ref.watch(filteredTransactionsProvider);
+    final selection = ref.watch(txSelectionProvider);
 
     return async.when(
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -38,6 +40,13 @@ class LedgerPage extends ConsumerWidget {
               ),
             ),
             const SliverToBoxAdapter(child: _QuickEntries()),
+            SliverToBoxAdapter(
+              child: selection.isEmpty
+                  ? const _SearchFilterBar()
+                  : _SelectionToolbar(
+                      allIds: records.map((r) => r.row.id).toList(),
+                    ),
+            ),
             if (groups.isEmpty)
               const SliverFillRemaining(
                 hasScrollBody: false,
@@ -72,9 +81,10 @@ class LedgerPage extends ConsumerWidget {
       for (final t in items) {
         if (t.isExpense) {
           expense += t.amountCents;
-        } else {
+        } else if (t.isIncome) {
           income += t.amountCents;
         }
+        // 转账不计入收支，日合计不体现。
       }
       return _DayGroup(day: d, items: items, expense: expense, income: income);
     }).toList(growable: false);
@@ -174,10 +184,15 @@ class _TxTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.colors;
     final catColor = Color(record.categoryColor);
+    final selection = ref.watch(txSelectionProvider);
+    final inSelectionMode = selection.isNotEmpty;
+    final isSelected = selection.contains(record.row.id);
 
     return Dismissible(
       key: ValueKey('tx-${record.row.id}'),
-      direction: DismissDirection.endToStart,
+      direction: inSelectionMode
+          ? DismissDirection.none
+          : DismissDirection.endToStart,
       background: Container(
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 20),
@@ -219,9 +234,18 @@ class _TxTile extends ConsumerWidget {
         }
       },
       child: Material(
-        color: Colors.transparent,
+        color:
+            isSelected ? c.coral.withValues(alpha: 0.06) : Colors.transparent,
         child: InkWell(
-          onTap: () => RecordSheet.show(context, initial: record),
+          onTap: () {
+            if (inSelectionMode) {
+              ref.read(txSelectionProvider.notifier).toggle(record.row.id);
+            } else {
+              RecordSheet.show(context, initial: record);
+            }
+          },
+          onLongPress: () =>
+              ref.read(txSelectionProvider.notifier).toggle(record.row.id),
           child: Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: AppSpacing.md,
@@ -229,6 +253,10 @@ class _TxTile extends ConsumerWidget {
             ),
             child: Row(
               children: [
+                if (inSelectionMode) ...[
+                  _SelectionDot(selected: isSelected),
+                  const SizedBox(width: AppSpacing.sm),
+                ],
                 SoftIcon(
                   icon: iconFor(record.categoryIconKey),
                   color: catColor,
@@ -251,7 +279,10 @@ class _TxTile extends ConsumerWidget {
                       const SizedBox(height: 2),
                       Text(
                         [
-                          record.accountName,
+                          if (record.isTransfer)
+                            '${record.accountName} → ${record.toAccountName ?? '?'}'
+                          else
+                            record.accountName,
                           if (record.note.isNotEmpty) record.note,
                           DateLabels.time(record.occurredAt),
                         ].join(' · '),
@@ -267,11 +298,16 @@ class _TxTile extends ConsumerWidget {
                 ),
                 const SizedBox(width: AppSpacing.xs),
                 Text(
-                  Money.signed(record.amountCents, isExpense: record.isExpense),
+                  record.isTransfer
+                      ? Money.symbol(record.amountCents)
+                      : Money.signed(record.amountCents,
+                          isExpense: record.isExpense),
                   style: TextStyle(
                     fontSize: AppFontSizes.lg,
                     fontWeight: FontWeight.w800,
-                    color: record.isExpense ? c.ink : c.mintText,
+                    color: record.isTransfer
+                        ? c.ink2
+                        : (record.isExpense ? c.ink : c.mintText),
                     fontFeatures: const [FontFeature.tabularFigures()],
                   ),
                 ),
@@ -340,6 +376,408 @@ class _QuickEntries extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _SearchFilterBar extends ConsumerStatefulWidget {
+  const _SearchFilterBar();
+
+  @override
+  ConsumerState<_SearchFilterBar> createState() => _SearchFilterBarState();
+}
+
+class _SearchFilterBarState extends ConsumerState<_SearchFilterBar> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller =
+        TextEditingController(text: ref.read(txFilterProvider).query);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final filter = ref.watch(txFilterProvider);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+          AppSpacing.md, AppSpacing.xs, AppSpacing.md, AppSpacing.sm),
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              height: 40,
+              decoration: BoxDecoration(
+                color: c.surface2,
+                borderRadius: BorderRadius.circular(AppRadii.sm),
+              ),
+              child: TextField(
+                controller: _controller,
+                onChanged: (v) =>
+                    ref.read(txFilterProvider.notifier).setQuery(v),
+                textInputAction: TextInputAction.search,
+                style: TextStyle(fontSize: AppFontSizes.sm, color: c.ink),
+                decoration: InputDecoration(
+                  hintText: '搜索分类 / 账户 / 备注',
+                  hintStyle:
+                      TextStyle(fontSize: AppFontSizes.sm, color: c.ink3),
+                  prefixIcon:
+                      Icon(Icons.search_rounded, size: 18, color: c.ink3),
+                  border: InputBorder.none,
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.xs),
+          _FilterButton(
+            active: filter.isActive,
+            onTap: () => _FilterSheet.show(context),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FilterButton extends StatelessWidget {
+  const _FilterButton({required this.active, required this.onTap});
+
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppRadii.sm),
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: active ? c.mint.withValues(alpha: 0.14) : c.surface2,
+          borderRadius: BorderRadius.circular(AppRadii.sm),
+          border: active ? Border.all(color: c.mint, width: 1.4) : null,
+        ),
+        child: Icon(
+          Icons.tune_rounded,
+          size: 20,
+          color: active ? c.mintDeep : c.ink2,
+        ),
+      ),
+    );
+  }
+}
+
+String _kindLabel(TxKind k) => switch (k) {
+      TxKind.expense => '支出',
+      TxKind.income => '收入',
+      TxKind.transfer => '转账',
+    };
+
+class _FilterSheet extends ConsumerStatefulWidget {
+  const _FilterSheet();
+
+  static Future<void> show(BuildContext context) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => const _FilterSheet(),
+    );
+  }
+
+  @override
+  ConsumerState<_FilterSheet> createState() => _FilterSheetState();
+}
+
+class _FilterSheetState extends ConsumerState<_FilterSheet> {
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final media = MediaQuery.of(context);
+    final filter = ref.watch(txFilterProvider);
+    final categories = (ref.watch(allCategoriesProvider).value ?? const [])
+        .where((x) => x.kind != TxKind.transfer)
+        .toList();
+    final accounts = ref.watch(accountsProvider).value ?? const [];
+
+    return Container(
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(AppRadii.xl)),
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: AppSpacing.xs),
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: c.border,
+                  borderRadius: BorderRadius.circular(AppRadii.pill),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.md, AppSpacing.sm, AppSpacing.sm, 0),
+              child: Row(
+                children: [
+                  Text(
+                    '筛选',
+                    style: TextStyle(
+                      fontSize: AppFontSizes.xl,
+                      fontWeight: FontWeight.w800,
+                      color: c.ink,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (filter.isActive)
+                    TextButton(
+                      onPressed: () =>
+                          ref.read(txFilterProvider.notifier).clear(),
+                      child: Text('清除',
+                          style: TextStyle(color: c.coralText)),
+                    ),
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: Icon(Icons.close_rounded, size: 20, color: c.ink2),
+                  ),
+                ],
+              ),
+            ),
+            _section('类型', c),
+            _chipWrap(c, children: [
+              for (final k in TxKind.values)
+                ChoiceChip(
+                  label: Text(_kindLabel(k)),
+                  selected: filter.kinds.contains(k),
+                  onSelected: (_) =>
+                      ref.read(txFilterProvider.notifier).toggleKind(k),
+                  selectedColor: c.mint.withValues(alpha: 0.14),
+                  side: BorderSide(
+                    color: filter.kinds.contains(k) ? c.mint : c.border,
+                  ),
+                  showCheckmark: false,
+                ),
+            ]),
+            _section('分类', c),
+            _chipWrap(c, children: [
+              for (final cat in categories)
+                ChoiceChip(
+                  label: Text(cat.name),
+                  selected: filter.categoryIds.contains(cat.id),
+                  onSelected: (_) => ref
+                      .read(txFilterProvider.notifier)
+                      .toggleCategory(cat.id),
+                  selectedColor: c.mint.withValues(alpha: 0.14),
+                  side: BorderSide(
+                    color: filter.categoryIds.contains(cat.id)
+                        ? c.mint
+                        : c.border,
+                  ),
+                  showCheckmark: false,
+                ),
+            ]),
+            _section('账户', c),
+            _chipWrap(c, children: [
+              for (final a in accounts)
+                ChoiceChip(
+                  label: Text(a.name),
+                  selected: filter.accountIds.contains(a.id),
+                  onSelected: (_) => ref
+                      .read(txFilterProvider.notifier)
+                      .toggleAccount(a.id),
+                  selectedColor: c.mint.withValues(alpha: 0.14),
+                  side: BorderSide(
+                    color:
+                        filter.accountIds.contains(a.id) ? c.mint : c.border,
+                  ),
+                  showCheckmark: false,
+                ),
+            ]),
+            const SizedBox(height: AppSpacing.lg),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('完成'),
+                ),
+              ),
+            ),
+            SizedBox(height: media.padding.bottom + AppSpacing.lg),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _section(String title, AppColors c) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+          AppSpacing.md, AppSpacing.md, AppSpacing.md, AppSpacing.xs),
+      child: Text(
+        title,
+        style: TextStyle(
+          fontSize: AppFontSizes.sm,
+          fontWeight: FontWeight.w700,
+          color: c.ink2,
+        ),
+      ),
+    );
+  }
+
+  Widget _chipWrap(AppColors c, {required List<Widget> children}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+      child: Wrap(
+        spacing: AppSpacing.xs,
+        runSpacing: AppSpacing.xs,
+        children: children,
+      ),
+    );
+  }
+}
+
+class _SelectionToolbar extends ConsumerWidget {
+  const _SelectionToolbar({required this.allIds});
+
+  final List<int> allIds;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.colors;
+    final selection = ref.watch(txSelectionProvider);
+    final allSelected =
+        allIds.isNotEmpty && allIds.every((id) => selection.contains(id));
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+          AppSpacing.md, AppSpacing.xs, AppSpacing.md, AppSpacing.sm),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+        decoration: BoxDecoration(
+          color: c.surface,
+          borderRadius: BorderRadius.circular(AppRadii.sm),
+          border: Border.all(color: c.coral.withValues(alpha: 0.5)),
+        ),
+        child: Row(
+          children: [
+            Text(
+              '已选 ${selection.length} 笔',
+              style: TextStyle(
+                fontSize: AppFontSizes.md,
+                fontWeight: FontWeight.w700,
+                color: c.ink,
+              ),
+            ),
+            const Spacer(),
+            TextButton(
+              onPressed: () {
+                final notifier = ref.read(txSelectionProvider.notifier);
+                if (allSelected) {
+                  notifier.clear();
+                } else {
+                  notifier.addAll(allIds);
+                }
+              },
+              child: Text(allSelected ? '取消全选' : '全选',
+                  style: const TextStyle(fontSize: AppFontSizes.sm)),
+            ),
+            FilledButton(
+              onPressed: () => _batchDelete(context, ref, selection),
+              style: FilledButton.styleFrom(
+                backgroundColor: c.coral,
+                foregroundColor: c.onCoral,
+                visualDensity: VisualDensity.compact,
+              ),
+              child: const Text('删除'),
+            ),
+            IconButton(
+              onPressed: () => ref.read(txSelectionProvider.notifier).clear(),
+              icon: Icon(Icons.close_rounded, size: 20, color: c.ink2),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _batchDelete(
+      BuildContext context, WidgetRef ref, Set<int> ids) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('删除选中的 ${ids.length} 笔账目？'),
+        content: const Text('删除后不可恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    await ref
+        .read(ledgerRepositoryProvider)
+        .deleteTransactions(ids.toList());
+    ref.read(txSelectionProvider.notifier).clear();
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已删除 ${ids.length} 笔')),
+      );
+    }
+  }
+}
+
+class _SelectionDot extends StatelessWidget {
+  const _SelectionDot({required this.selected});
+
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Container(
+      width: 20,
+      height: 20,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: selected ? c.coral : Colors.transparent,
+        border: Border.all(
+          color: selected ? c.coral : c.ink3.withValues(alpha: 0.6),
+          width: 1.5,
+        ),
+      ),
+      child: selected
+          ? Icon(Icons.check_rounded, size: 13, color: c.onCoral)
+          : null,
     );
   }
 }

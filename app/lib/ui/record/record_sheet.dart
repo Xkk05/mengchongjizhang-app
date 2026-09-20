@@ -50,6 +50,7 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
 
   int? _categoryId;
   int? _accountId;
+  int? _toAccountId;
   bool _saving = false;
 
   bool get _isEdit => widget.initial != null;
@@ -59,6 +60,7 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
     super.initState();
     _categoryId = widget.initial?.row.categoryId;
     _accountId = widget.initial?.row.accountId;
+    _toAccountId = widget.initial?.row.toAccountId;
   }
 
   @override
@@ -69,8 +71,16 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
 
   int get _amountCents => Money.parseYuan(_amount) ?? 0;
 
-  bool get _canSave =>
-      !_saving && _amountCents > 0 && _categoryId != null && _accountId != null;
+  bool get _canSave {
+    if (_saving || _amountCents <= 0) return false;
+    if (_kind == TxKind.transfer) {
+      // 转账：金额 + 转出/转入两个账户，且不能转给自己。
+      return _accountId != null &&
+          _toAccountId != null &&
+          _accountId != _toAccountId;
+    }
+    return _categoryId != null && _accountId != null;
+  }
 
   void _onKey(String k) {
     setState(() {
@@ -104,15 +114,22 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
     final repo = ref.read(ledgerRepositoryProvider);
 
     try {
+      // 转账用内置「转账」分类占位；收支用用户选中的分类。
+      final categoryId = _kind == TxKind.transfer
+          ? await repo.transferCategoryId()
+          : _categoryId!;
+      final toAccountId = _kind == TxKind.transfer ? _toAccountId : null;
+
       if (_isEdit) {
         await repo.updateTransaction(
           id: widget.initial!.row.id,
           accountId: _accountId!,
-          categoryId: _categoryId!,
+          categoryId: categoryId,
           kind: _kind,
           amountCents: _amountCents,
           occurredAt: _occurredAt,
           note: _note.text,
+          toAccountId: toAccountId,
         );
       } else {
         // 直接查库拿默认账本（库里没有就自动补建），绝不能读 UI 侧的
@@ -122,11 +139,12 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
         await repo.addTransaction(
           ledgerId: ledgerId,
           accountId: _accountId!,
-          categoryId: _categoryId!,
+          categoryId: categoryId,
           kind: _kind,
           amountCents: _amountCents,
           occurredAt: _occurredAt,
           note: _note.text,
+          toAccountId: toAccountId,
         );
       }
 
@@ -134,7 +152,11 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
       Navigator.of(context).pop();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(_isEdit ? '已更新' : '记好啦 · 宠物 +10 经验，金币 +2'),
+          content: Text(_isEdit
+              ? '已更新'
+              : (_kind == TxKind.transfer
+                  ? '转账成功 · 宠物 +10 经验，金币 +2'
+                  : '记好啦 · 宠物 +10 经验，金币 +2')),
         ),
       );
     } catch (e) {
@@ -194,20 +216,28 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
                 child: Column(
                   children: [
                     _amountRow(c),
-                    categoriesAsync.when(
-                      loading: () => const SizedBox(height: 120),
-                      error: (e, _) => Padding(
-                        padding: const EdgeInsets.all(AppSpacing.md),
-                        child: Text('分类加载失败：$e'),
+                    if (_kind == TxKind.transfer)
+                      accountsAsync.when(
+                        loading: () => const SizedBox(height: 84),
+                        error: (e, _) => const SizedBox(height: 84),
+                        data: (accounts) => _transferAccounts(c, accounts),
+                      )
+                    else
+                      categoriesAsync.when(
+                        loading: () => const SizedBox(height: 120),
+                        error: (e, _) => Padding(
+                          padding: const EdgeInsets.all(AppSpacing.md),
+                          child: Text('分类加载失败：$e'),
+                        ),
+                        data: (cats) => _categoryGrid(c, cats),
                       ),
-                      data: (cats) => _categoryGrid(c, cats),
-                    ),
                     _noteRow(c),
-                    accountsAsync.when(
-                      loading: () => const SizedBox(height: 42),
-                      error: (e, _) => const SizedBox(height: 42),
-                      data: (accounts) => _accountRow(c, accounts),
-                    ),
+                    if (_kind != TxKind.transfer)
+                      accountsAsync.when(
+                        loading: () => const SizedBox(height: 42),
+                        error: (e, _) => const SizedBox(height: 42),
+                        data: (accounts) => _accountRow(c, accounts),
+                      ),
                   ],
                 ),
               ),
@@ -345,6 +375,7 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
 
   Widget _amountRow(AppColors c) {
     final income = _kind == TxKind.income;
+    final transfer = _kind == TxKind.transfer;
     return Container(
       margin: const EdgeInsets.symmetric(
           horizontal: AppSpacing.md, vertical: AppSpacing.xs),
@@ -362,7 +393,9 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
             style: TextStyle(
               fontSize: AppFontSizes.xl,
               fontWeight: FontWeight.w800,
-              color: income ? c.mintText : c.coralText,
+              color: transfer
+                  ? c.ink2
+                  : (income ? c.mintText : c.coralText),
             ),
           ),
           const SizedBox(width: 6),
@@ -409,20 +442,79 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
     if (accounts.isEmpty) return const SizedBox(height: 42);
     // 首次进入默认选第一个账户
     _accountId ??= accounts.first.id;
+    return _accountChips(c, accounts, selectedId: _accountId,
+        onSelect: (id) => setState(() => _accountId = id));
+  }
 
+  /// 转账的转出 / 转入两个账户选择器。
+  Widget _transferAccounts(AppColors c, List<Account> accounts) {
+    if (accounts.isEmpty) return const SizedBox(height: 84);
+    _accountId ??= accounts.first.id;
+    if (accounts.length > 1) {
+      _toAccountId ??= accounts[1].id;
+    }
+    return Column(
+      children: [
+        _accountChips(
+          c,
+          accounts,
+          label: '转出',
+          selectedId: _accountId,
+          onSelect: (id) => setState(() {
+            _accountId = id;
+            if (id == _toAccountId) _toAccountId = null;
+          }),
+        ),
+        const SizedBox(height: AppSpacing.xs),
+        _accountChips(
+          c,
+          accounts,
+          label: '转入',
+          selectedId: _toAccountId,
+          onSelect: (id) => setState(() {
+            _toAccountId = id;
+            if (id == _accountId) _accountId = null;
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _accountChips(
+    AppColors c,
+    List<Account> accounts, {
+    String? label,
+    required int? selectedId,
+    required ValueChanged<int> onSelect,
+  }) {
     return SizedBox(
       height: 42,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
-        itemCount: accounts.length,
+        itemCount: label == null ? accounts.length : accounts.length + 1,
         separatorBuilder: (_, _) => const SizedBox(width: AppSpacing.xs),
         itemBuilder: (context, i) {
-          final a = accounts[i];
-          final selected = a.id == _accountId;
+          if (label != null && i == 0) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.only(right: AppSpacing.xs),
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: AppFontSizes.xs,
+                    fontWeight: FontWeight.w700,
+                    color: c.ink2,
+                  ),
+                ),
+              ),
+            );
+          }
+          final a = accounts[label == null ? i : i - 1];
+          final selected = a.id == selectedId;
           return ChoiceChip(
             selected: selected,
-            onSelected: (_) => setState(() => _accountId = a.id),
+            onSelected: (_) => onSelect(a.id),
             avatar: Icon(
               iconFor(a.iconKey),
               size: 15,
@@ -618,7 +710,11 @@ class _KindToggle extends StatelessWidget {
     final c = context.colors;
     Widget seg(String label, TxKind k) {
       final on = k == kind;
-      final accent = k == TxKind.expense ? c.coral : c.mint;
+      final Color accent = switch (k) {
+        TxKind.expense => c.coral,
+        TxKind.income => c.mint,
+        TxKind.transfer => c.ink2,
+      };
       return GestureDetector(
         onTap: () {
           HapticFeedback.selectionClick();
@@ -626,7 +722,7 @@ class _KindToggle extends StatelessWidget {
         },
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
             color: on ? accent : Colors.transparent,
             borderRadius: BorderRadius.circular(AppRadii.pill),
@@ -651,7 +747,11 @@ class _KindToggle extends StatelessWidget {
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: [seg('支出', TxKind.expense), seg('收入', TxKind.income)],
+        children: [
+          seg('支出', TxKind.expense),
+          seg('收入', TxKind.income),
+          seg('转账', TxKind.transfer),
+        ],
       ),
     );
   }

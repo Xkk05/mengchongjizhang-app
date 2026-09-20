@@ -8,8 +8,10 @@ void main() {
         (
           at: DateTime(2026, 9, 19, 14, 30, 45),
           isExpense: true,
+          isTransfer: false,
           categoryName: '餐饮',
           accountName: '支付宝',
+          toAccountName: '',
           amountCents: 3250,
           note: '午饭',
         ),
@@ -17,8 +19,8 @@ void main() {
 
       expect(csv.startsWith(LedgerCsv.bom), isTrue);
       final lines = csv.substring(1).split('\r\n');
-      expect(lines.first, '日期,类型,分类,账户,金额,备注');
-      expect(lines[1], '2026-09-19 14:30,支出,餐饮,支付宝,32.50,午饭');
+      expect(lines.first, '日期,类型,分类,账户,转入账户,金额,备注');
+      expect(lines[1], '2026-09-19 14:30,支出,餐饮,支付宝,,32.50,午饭');
     });
 
     test('含逗号 / 引号 / 换行的字段会被正确转义', () {
@@ -26,8 +28,10 @@ void main() {
         (
           at: DateTime(2026, 9, 19, 9, 0),
           isExpense: false,
+          isTransfer: false,
           categoryName: '工资',
           accountName: '招商银行',
+          toAccountName: '',
           amountCents: 1850000,
           note: '备注里有,逗号 和 "引号"',
         ),
@@ -46,8 +50,10 @@ void main() {
         (
           at: DateTime(2026, 1, 2, 3, 4),
           isExpense: true,
+          isTransfer: false,
           categoryName: '购物',
           accountName: '现金',
+          toAccountName: '',
           amountCents: 1234567,
           note: '',
         ),
@@ -60,6 +66,60 @@ void main() {
     test('文件名含时间戳', () {
       expect(LedgerCsv.fileName(DateTime(2026, 9, 19, 16, 5)),
           '随心宠记账-账单-20260919-1605.csv');
+    });
+  });
+
+  group('LedgerCsv 转账', () {
+    test('编码转账行带「转账」类型与转入账户', () {
+      final csv = LedgerCsv.encode([
+        (
+          at: DateTime(2026, 9, 20, 10, 0),
+          isExpense: false,
+          isTransfer: true,
+          categoryName: '转账',
+          accountName: '招商银行',
+          toAccountName: '支付宝',
+          amountCents: 50000,
+          note: '资金调拨',
+        ),
+      ]);
+      final lines = csv.substring(1).split('\r\n');
+      expect(
+          lines[1], '2026-09-20 10:00,转账,转账,招商银行,支付宝,500.00,资金调拨');
+    });
+
+    test('解析「转账」类型并带回转入账户', () {
+      final parsed = LedgerCsv.parse('日期,类型,分类,账户,转入账户,金额,备注\r\n'
+          '2026-09-20 10:00,转账,转账,招商银行,支付宝,500.00,资金调拨\r\n');
+      expect(parsed.errors, isEmpty);
+      final r = parsed.rows.single;
+      expect(r.isTransfer, isTrue);
+      expect(r.isExpense, isFalse);
+      expect(r.accountName, '招商银行');
+      expect(r.toAccountName, '支付宝');
+      expect(r.amountCents, 50000);
+    });
+
+    test('转账指纹与同金额收入/支出不同', () {
+      final transfer = LedgerCsv.fingerprintOf(
+        at: DateTime(2026, 9, 20, 10, 0),
+        isExpense: false,
+        isTransfer: true,
+        amountCents: 50000,
+        categoryName: '转账',
+        accountName: '招商银行',
+        toAccountName: '支付宝',
+        note: '',
+      );
+      final income = LedgerCsv.fingerprintOf(
+        at: DateTime(2026, 9, 20, 10, 0),
+        isExpense: false,
+        amountCents: 50000,
+        categoryName: '转账',
+        accountName: '招商银行',
+        note: '',
+      );
+      expect(transfer, isNot(income));
     });
   });
 
