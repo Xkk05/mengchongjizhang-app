@@ -186,20 +186,31 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
             ),
             _header(c),
             const Divider(height: 1),
+            // 中部统一放进滚动区：金额 / 分类 / 备注 / 账户无论屏幕多小、
+            // 字体多大都只是「需要滚一下」，绝不会再被压成 0 高度消失。
             Expanded(
-              child: categoriesAsync.when(
-                loading: () =>
-                    const Center(child: CircularProgressIndicator()),
-                error: (e, _) => Center(child: Text('分类加载失败：$e')),
-                data: (cats) => _categoryGrid(c, cats),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+                child: Column(
+                  children: [
+                    _amountRow(c),
+                    categoriesAsync.when(
+                      loading: () => const SizedBox(height: 120),
+                      error: (e, _) => Padding(
+                        padding: const EdgeInsets.all(AppSpacing.md),
+                        child: Text('分类加载失败：$e'),
+                      ),
+                      data: (cats) => _categoryGrid(c, cats),
+                    ),
+                    _noteRow(c),
+                    accountsAsync.when(
+                      loading: () => const SizedBox(height: 42),
+                      error: (e, _) => const SizedBox(height: 42),
+                      data: (accounts) => _accountRow(c, accounts),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            _amountRow(c),
-            _noteRow(c),
-            accountsAsync.when(
-              loading: () => const SizedBox(height: 42),
-              error: (e, _) => const SizedBox(height: 42),
-              data: (accounts) => _accountRow(c, accounts),
             ),
             _keypad(c),
             SizedBox(height: media.padding.bottom),
@@ -264,63 +275,71 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
     }
   }
 
+  /// 分类区固定高度：两行半可见、可内部滚动，尺寸不随外部空间伸缩。
   Widget _categoryGrid(AppColors c, List<Category> cats) {
     if (cats.isEmpty) {
-      return Center(
-        child: Text('暂无分类', style: TextStyle(color: c.ink3)),
+      return SizedBox(
+        height: 80,
+        child: Center(
+          child: Text('暂无分类', style: TextStyle(color: c.ink3)),
+        ),
       );
     }
-    return GridView.builder(
-      padding: const EdgeInsets.fromLTRB(
-          AppSpacing.md, AppSpacing.sm, AppSpacing.md, AppSpacing.xs),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 4,
-        mainAxisSpacing: AppSpacing.sm,
-        crossAxisSpacing: AppSpacing.sm,
-        childAspectRatio: 1.05,
+    return SizedBox(
+      height: 186,
+      child: GridView.builder(
+        padding: const EdgeInsets.fromLTRB(
+            AppSpacing.md, AppSpacing.xs, AppSpacing.md, 0),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 4,
+          mainAxisSpacing: AppSpacing.sm,
+          crossAxisSpacing: AppSpacing.sm,
+          childAspectRatio: 1.05,
+        ),
+        itemCount: cats.length,
+        itemBuilder: (context, i) {
+          final cat = cats[i];
+          final selected = cat.id == _categoryId;
+          final color = Color(cat.colorValue);
+          return InkWell(
+            borderRadius: BorderRadius.circular(AppRadii.sm),
+            onTap: () => setState(() => _categoryId = cat.id),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: selected ? color : color.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(AppRadii.sm),
+                    border: selected
+                        ? Border.all(
+                            color: color.withValues(alpha: 0.4), width: 2)
+                        : null,
+                  ),
+                  child: Icon(
+                    iconFor(cat.iconKey),
+                    size: 20,
+                    color: selected ? Colors.white : color,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  cat.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: AppFontSizes.xs,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                    color: selected ? c.ink : c.ink2,
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
       ),
-      itemCount: cats.length,
-      itemBuilder: (context, i) {
-        final cat = cats[i];
-        final selected = cat.id == _categoryId;
-        final color = Color(cat.colorValue);
-        return InkWell(
-          borderRadius: BorderRadius.circular(AppRadii.sm),
-          onTap: () => setState(() => _categoryId = cat.id),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  color: selected ? color : color.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(AppRadii.sm),
-                  border: selected
-                      ? Border.all(color: color.withValues(alpha: 0.4), width: 2)
-                      : null,
-                ),
-                child: Icon(
-                  iconFor(cat.iconKey),
-                  size: 20,
-                  color: selected ? Colors.white : color,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                cat.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: AppFontSizes.xs,
-                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                  color: selected ? c.ink : c.ink2,
-                ),
-              ),
-            ],
-          ),
-        );
-      },
     );
   }
 
@@ -469,78 +488,85 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
           AppSpacing.sm, AppSpacing.xs, AppSpacing.sm, AppSpacing.xs),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(
-            flex: 3,
-            child: Column(
-              children: [
-                Row(children: [
-                  key('1'),
-                  key('2'),
-                  key('3'),
-                ]),
-                Row(children: [
-                  key('4'),
-                  key('5'),
-                  key('6'),
-                ]),
-                Row(children: [
-                  key('7'),
-                  key('8'),
-                  key('9'),
-                ]),
-                Row(children: [
-                  key('.'),
-                  key('0'),
-                  key('.', icon: Icons.backspace_outlined,
-                      onTap: () => _onKey('del')),
-                ]),
-              ],
+      // IntrinsicHeight 让 Row 先按内容量出确定高度，再交给
+      // CrossAxisAlignment.stretch 让保存键与键盘等高——否则 Row 在
+      // 外层 Column 里拿到的是无限高度，stretch 会触发
+      // "BoxConstraints forces an infinite height"。
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              flex: 3,
+              child: Column(
+                children: [
+                  Row(children: [
+                    key('1'),
+                    key('2'),
+                    key('3'),
+                  ]),
+                  Row(children: [
+                    key('4'),
+                    key('5'),
+                    key('6'),
+                  ]),
+                  Row(children: [
+                    key('7'),
+                    key('8'),
+                    key('9'),
+                  ]),
+                  Row(children: [
+                    key('.'),
+                    key('0'),
+                    key('.', icon: Icons.backspace_outlined,
+                        onTap: () => _onKey('del')),
+                  ]),
+                ],
+              ),
             ),
-          ),
-          const SizedBox(width: 2),
-          _saveButton(c),
-        ],
+            const SizedBox(width: 2),
+            _saveButton(c),
+          ],
+        ),
       ),
     );
   }
 
-  /// 常驻保存键：占据键盘整列高度，任何状态下都清晰可见——
-  /// 可用时是珊瑚红渐变实心键，不可用时是珊瑚红浅底虚键，绝不隐形。
+  /// 常驻保存键：占据键盘整列高度，任何状态下都清晰可见。
+  /// 用 DecoratedBox 自绘渐变（不依赖 Material/Ink 的绘制链路），
+  /// 可用时珊瑚红渐变实心，不可用时浅珊瑚虚键——绝不隐形。
   Widget _saveButton(AppColors c) {
     final enabled = _canSave;
     return SizedBox(
       width: 88,
+      key: const ValueKey('record-save'),
       child: Padding(
         padding: const EdgeInsets.all(3),
-        child: Material(
-          color: Colors.transparent,
-          borderRadius: BorderRadius.circular(AppRadii.sm),
-          child: Ink(
-            decoration: BoxDecoration(
-              gradient: enabled
-                  ? LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [c.coral, c.coralDeep],
-                    )
-                  : null,
-              color: enabled ? null : c.coral.withValues(alpha: 0.14),
-              borderRadius: BorderRadius.circular(AppRadii.sm),
-              boxShadow: enabled
-                  ? [
-                      BoxShadow(
-                        color: c.coral.withValues(alpha: 0.28),
-                        blurRadius: 14,
-                        offset: const Offset(0, 5),
-                      ),
-                    ]
-                  : null,
-            ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: enabled
+                ? LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [c.coral, c.coralDeep],
+                  )
+                : null,
+            color: enabled ? null : c.coral.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(AppRadii.md),
+            boxShadow: enabled
+                ? [
+                    BoxShadow(
+                      color: c.coral.withValues(alpha: 0.28),
+                      blurRadius: 14,
+                      offset: const Offset(0, 5),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Material(
+            color: Colors.transparent,
             child: InkWell(
-              borderRadius: BorderRadius.circular(AppRadii.sm),
+              borderRadius: BorderRadius.circular(AppRadii.md),
               onTap: enabled ? _save : null,
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,

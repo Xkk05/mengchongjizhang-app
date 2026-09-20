@@ -15,8 +15,8 @@ import '../../home/pet_view.dart';
 class SceneHeader extends ConsumerWidget {
   const SceneHeader({super.key});
 
-  // 场景高度需要容纳左右各三排悬浮入口（第三排底部约 y=312），
-  // 再给底部余额卡的上叠留出安全间隙；字号放大后 296 已不够用。
+  // 场景高度只需容纳宠物与顶部信息；悬浮入口锚定底边向上排，
+  // 底部 64 起步给余额卡的上叠（-18）留出安全间隙，与字体缩放无关。
   static const double height = 344;
 
   @override
@@ -108,10 +108,11 @@ class SceneHeader extends ConsumerWidget {
             ),
           ),
 
-          // 左侧悬浮入口
+          // 左侧悬浮入口：锚定场景底部向上排——按钮随系统字体放大只会往上长，
+          // 永远不会再溢出场景底边被余额卡压住（top 定位时字体一大就出事）。
           Positioned(
             left: AppSpacing.sm,
-            top: 112,
+            bottom: 64,
             child: Column(
               children: [
                 _DockButton(
@@ -138,7 +139,7 @@ class SceneHeader extends ConsumerWidget {
           // 右侧悬浮入口
           Positioned(
             right: AppSpacing.sm,
-            top: 112,
+            bottom: 64,
             child: Column(
               children: [
                 _DockButton(

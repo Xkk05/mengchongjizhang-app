@@ -299,7 +299,7 @@ class ProfilePage extends ConsumerWidget {
               _InfoTile(
                 icon: Icons.info_outline_rounded,
                 label: '版本',
-                value: 'v0.7.0 · Flutter',
+                value: 'v0.9.2 · Flutter',
               ),
               Divider(height: 1, color: c.border),
               _InfoTile(
