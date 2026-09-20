@@ -28,13 +28,13 @@ class LedgerPage extends ConsumerWidget {
         return CustomScrollView(
           slivers: [
             const SliverToBoxAdapter(child: SceneHeader()),
+            // 余额卡不再上叠场景：上叠时卡片顶部（含文字）落在场景绘制
+            // 区内，个别机型上会被场景盖住文字。改为完全排在场景下方。
             SliverToBoxAdapter(
-              child: Transform.translate(
-                offset: const Offset(0, -18),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: AppSpacing.md),
-                  child: BalanceBar(),
-                ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                    AppSpacing.md, AppSpacing.sm, AppSpacing.md, 0),
+                child: const BalanceBar(),
               ),
             ),
             const SliverToBoxAdapter(child: _QuickEntries()),

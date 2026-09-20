@@ -16,7 +16,8 @@ class SceneHeader extends ConsumerWidget {
   const SceneHeader({super.key});
 
   // 场景高度只需容纳宠物与顶部信息；悬浮入口锚定底边向上排，
-  // 底部 64 起步给余额卡的上叠（-18）留出安全间隙，与字体缩放无关。
+  // 按钮随系统字体放大只会往上长，永远不会溢出场景底边。余额卡
+  // 排在场景下方（不再上叠），二者天然无重叠。
   static const double height = 344;
 
   @override

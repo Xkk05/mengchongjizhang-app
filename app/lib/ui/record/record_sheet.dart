@@ -102,7 +102,6 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
     setState(() => _saving = true);
 
     final repo = ref.read(ledgerRepositoryProvider);
-    final ledgerId = ref.read(currentLedgerIdProvider);
 
     try {
       if (_isEdit) {
@@ -116,9 +115,10 @@ class _RecordSheetState extends ConsumerState<RecordSheet> {
           note: _note.text,
         );
       } else {
-        if (ledgerId == null) {
-          throw StateError('账本尚未初始化完成');
-        }
+        // 直接查库拿默认账本（库里没有就自动补建），绝不能读 UI 侧的
+        // 账本流——首次保存时流可能还没吐出第一条数据，读到 null 就会
+        // 误报「账本尚未初始化完成」。
+        final ledgerId = await repo.defaultLedgerId();
         await repo.addTransaction(
           ledgerId: ledgerId,
           accountId: _accountId!,

@@ -838,7 +838,7 @@ class LedgerRepository {
         );
       }
 
-      final ledgerId = await _defaultLedgerId();
+      final ledgerId = await defaultLedgerId();
 
       // 1) 补齐缺失的分类
       for (final name in plan.newExpenseCategories) {
@@ -1002,7 +1002,11 @@ class LedgerRepository {
   static String _accountNameOf(CsvLedgerRow r) =>
       r.accountName.isEmpty ? _fallbackAccount : r.accountName;
 
-  Future<int> _defaultLedgerId() async {
+  /// 当前默认账本 id；库里一条账本都没有时自动补建「日常账本」。
+  ///
+  /// 直接查库而不是读 UI 侧的账本流，避免「流还没吐第一条数据就保存」
+  /// 导致拿到 null（真机表现为点保存报「账本尚未初始化完成」）。
+  Future<int> defaultLedgerId() async {
     final row = await (_db.select(_db.ledgers)
           ..orderBy([
             (t) => OrderingTerm.desc(t.isDefault),

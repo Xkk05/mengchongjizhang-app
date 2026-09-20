@@ -8,7 +8,7 @@ import 'package:suixin_pet_ledger/state/ledger_providers.dart';
 import 'package:suixin_pet_ledger/state/shop_providers.dart';
 import 'package:suixin_pet_ledger/ui/ledger/widgets/scene_header.dart';
 
-/// 回归测试：主页悬浮入口（锚定场景底部）与余额卡（上叠 -18）
+/// 回归测试：主页悬浮入口（锚定场景底部）与余额卡（排在场景下方）
 /// 在任何字体缩放下都不得重叠。真机曾因 top 定位 + 大字体被压住。
 void main() {
   const pet = PetState(
@@ -39,12 +39,9 @@ void main() {
           body: Column(
             children: [
               const SceneHeader(),
-              Transform.translate(
-                offset: const Offset(0, -18),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 16),
-                  child: BalanceBar(),
-                ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: BalanceBar(),
               ),
             ],
           ),
